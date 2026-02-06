@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hand Gesture Volume Control</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/vision_bundle.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .video-container {
+            position: relative;
+            transform: scaleX(-1); /* Mirror view */
+            width: 100%;
+            max-width: 640px;
+        }
+        canvas {
+            position: absolute;
+            left: 0;
+            top: 0;
+            z-index: 10;
+            width: 100%;
+            height: 100%;
+        }
+        video {
+            width: 100%;
+            height: auto;
+            display: block;
+            border-radius: 12px;
+        }
+    </style>
+</head>
+<body class="bg-slate-900 text-white min-h-screen flex flex-col items-center p-4">
+    <header class="mb-6 text-center">
+        <h1 class="text-3xl font-bold text-blue-400">AI Gesture Volume Controller</h1>
+        <p class="text-slate-400">Pinch thumb and index finger to adjust volume</p>
+    </header>
+
+    <div class="relative w-full max-w-2xl bg-black rounded-2xl overflow-hidden shadow-2xl border-4 border-slate-700 flex flex-col items-center justify-center min-h-[300px]">
+        
+        <div id="setup-container" class="absolute inset-0 z-50 flex flex-col items-center justify-center bg-slate-900 space-y-4 p-6 text-center">
+            <div id="loader" class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
+            <p id="setup-status">Loading ML Models...</p>
+            <button id="start-btn" class="hidden px-8 py-3 bg-blue-600 hover:bg-blue-500 rounded-full font-bold transition-colors shadow-lg">
+                Enable Camera & Start
+            </button>
+        </div>
+        
+        <div class="video-container">
+            <video id="webcam" autoplay playsinline></video>
+            <canvas id="output_canvas"></canvas>
+        </div>
+
+        <!-- Volume Bar Overlay -->
+        <div class="absolute left-6 top-1/2 -translate-y-1/2 z-20 flex flex-col items-center">
+            <div class="w-8 h-48 bg-slate-800 rounded-full overflow-hidden border-2 border-slate-600 flex flex-col justify-end shadow-lg">
+                <div id="volume-bar" class="w-full bg-blue-500 transition-all duration-75" style="height: 50%;"></div>
+            </div>
+            <span id="volume-text" class="mt-2 font-mono text-lg font-bold">50%</span>
+        </div>
+    </div>
+
+    <div id="debug-console" class="mt-4 p-3 bg-black text-xs font-mono text-green-400 w-full max-w-2xl rounded border border-slate-700 h-24 overflow-y-auto">
+        > System initialized. Waiting for user...
+    </div>
+
+    <div class="mt-8 grid grid-cols-1 md:grid-cols-2 gap-4 w-full max-w-2xl">
+        <div class="p-4 bg-slate-800 rounded-lg">
+            <h3 class="font-bold text-blue-300 mb-2">Instructions:</h3>
+            <ul class="text-sm space-y-1 text-slate-300">
+                <li>1. Click "Enable Camera"</li>
+                <li>2. Allow browser camera permissions</li>
+                <li>3. Show your hand clearly to the camera</li>
+                <li>4. Pinch thumb and index to see tracking</li>
+            </ul>
+        </div>
+        <div class="p-4 bg-slate-800 rounded-lg">
+            <h3 class="font-bold text-green-300 mb-2">Model Stats:</h3>
+            <p id="latency" class="text-sm text-slate-300">Latency: -- ms</p>
+            <p id="fps" class="text-sm text-slate-300">FPS: --</p>
+        </div>
+    </div>
+
+    <script type="module">
+        import { HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3";
+
+        const video = document.getElementById("webcam");
+        const canvasElement = document.getElementById("output_canvas");
+        const canvasCtx = canvasElement.getContext("2d");
+        const volumeBar = document.getElementById("volume-bar");
+        const volumeText = document.getElementById("volume-text");
+        const setupContainer = document.getElementById("setup-container");
+        const setupStatus = document.getElementById("setup-status");
+        const startBtn = document.getElementById("start-btn");
+        const loader = document.getElementById("loader");
+        const debugConsole = document.getElementById("debug-console");
+        const latencyText = document.getElementById("latency");
+        const fpsText = document.getElementById("fps");
+
+        let handLandmarker = undefined;
+        let lastVideoTime = -1;
+        let frames = 0;
+        let lastFpsUpdate = performance.now();
+
+        function log(msg) {
+            const entry = document.createElement('div');
+            entry.textContent = `> ${msg}`;
+            debugConsole.appendChild(entry);
+            debugConsole.scrollTop = debugConsole.scrollHeight;
+        }
+
+        async function init() {
+            try {
+                log("Loading FilesetResolver...");
+                const vision = await FilesetResolver.forVisionTasks(
+                    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
+                );
+                
+                log("Loading HandLandmarker model...");
+                handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                    baseOptions: {
+                        modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`,
+                        delegate: "GPU"
+                    },
+                    runningMode: "VIDEO",
+                    numHands: 1
+                });
+                
+                log("Model ready.");
+                setupStatus.innerText = "Model Ready!";
+                loader.classList.add("hidden");
+                startBtn.classList.remove("hidden");
+            } catch (err) {
+                log("ERROR: " + err.message);
+                setupStatus.innerText = "Failed to load model.";
+            }
+        }
+
+        startBtn.addEventListener("click", async () => {
+            log("Requesting camera access...");
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { width: 1280, height: 720 } 
+                });
+                video.srcObject = stream;
+                setupContainer.classList.add("hidden");
+                log("Camera started. Tracking initialized.");
+                video.addEventListener("loadeddata", () => {
+                    requestAnimationFrame(predictWebcam);
+                });
+            } catch (err) {
+                log("CAMERA ERROR: " + err.message);
+                alert("Please allow camera access to use this app.");
+            }
+        });
+
+        function calculateDistance(p1, p2) {
+            return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
+        }
+
+        async function predictWebcam() {
+            // Ensure canvas matches video display size
+            if (canvasElement.width !== video.videoWidth || canvasElement.height !== video.videoHeight) {
+                canvasElement.width = video.videoWidth;
+                canvasElement.height = video.videoHeight;
+            }
+
+            let startTimeMs = performance.now();
+            
+            if (lastVideoTime !== video.currentTime && handLandmarker) {
+                lastVideoTime = video.currentTime;
+                const results = handLandmarker.detectForVideo(video, startTimeMs);
+
+                canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+                if (results.landmarks && results.landmarks.length > 0) {
+                    const landmarks = results.landmarks[0];
+                    const thumbTip = landmarks[4];
+                    const indexTip = landmarks[8];
+
+                    // Calculate distance
+                    const dist = calculateDistance(thumbTip, indexTip);
+                    
+                    // Normalizing: 0.03 (closed) to 0.25 (wide open)
+                    let vol = Math.max(0, Math.min(100, (dist - 0.03) * 450));
+                    
+                    updateVolumeUI(Math.round(vol));
+                    drawHand(landmarks, dist);
+                }
+            }
+
+            // FPS Counter
+            frames++;
+            const now = performance.now();
+            if (now - lastFpsUpdate > 1000) {
+                fpsText.innerText = `FPS: ${frames}`;
+                frames = 0;
+                lastFpsUpdate = now;
+            }
+
+            latencyText.innerText = `Latency: ${(performance.now() - startTimeMs).toFixed(1)} ms`;
+            window.requestAnimationFrame(predictWebcam);
+        }
+
+        function updateVolumeUI(vol) {
+            volumeBar.style.height = `${vol}%`;
+            volumeText.innerText = `${vol}%`;
+        }
+
+        function drawHand(landmarks, dist) {
+            // Draw Dots
+            landmarks.forEach(point => {
+                canvasCtx.beginPath();
+                canvasCtx.arc(point.x * canvasElement.width, point.y * canvasElement.height, 5, 0, 2 * Math.PI);
+                canvasCtx.fillStyle = "#3b82f6";
+                canvasCtx.fill();
+            });
+
+            // Draw line between pinch points
+            const p1 = { x: landmarks[4].x * canvasElement.width, y: landmarks[4].y * canvasElement.height };
+            const p2 = { x: landmarks[8].x * canvasElement.width, y: landmarks[8].y * canvasElement.height };
+
+            canvasCtx.beginPath();
+            canvasCtx.moveTo(p1.x, p1.y);
+            canvasCtx.lineTo(p2.x, p2.y);
+            canvasCtx.lineWidth = 4;
+            canvasCtx.strokeStyle = dist < 0.08 ? "#ef4444" : "#10b981";
+            canvasCtx.stroke();
+        }
+
+        init();
+    </script>
+</body>
+</html>
+
