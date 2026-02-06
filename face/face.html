@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Face Eye Gesture Volume Control</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/vision_bundle.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .video-container {
+            position: relative;
+            transform: scaleX(-1); /* Mirror view for natural interaction */
+            width: 100%;
+            max-width: 640px;
+        }
+        canvas {
+            position: absolute;
+            left: 0;
+            top: 0;
+            z-index: 10;
+            width: 100%;
+            height: 100%;
+        }
+        video {
+            width: 100%;
+            height: auto;
+            display: block;
+            border-radius: 12px;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-white min-h-screen flex flex-col items-center p-4">
+    <header class="mb-6 text-center">
+        <h1 class="text-3xl font-bold text-yellow-400">AI Eye Gesture Controller</h1>
+        <p class="text-gray-400">Aankhein kholne aur band karne se volume control karein</p>
+    </header>
+
+    <div class="relative w-full max-w-2xl bg-black rounded-2xl overflow-hidden shadow-2xl border-4 border-gray-700 flex flex-col items-center justify-center min-h-[300px]">
+        
+        <!-- Setup Screen -->
+        <div id="setup-container" class="absolute inset-0 z-50 flex flex-col items-center justify-center bg-gray-900 space-y-4 p-6 text-center">
+            <div id="loader" class="animate-spin rounded-full h-12 w-12 border-b-2 border-yellow-500"></div>
+            <p id="setup-status">Face Model Load ho raha hai...</p>
+            <button id="start-btn" class="hidden px-8 py-3 bg-yellow-600 hover:bg-yellow-500 rounded-full font-bold transition-colors shadow-lg">
+                Camera Start Karein
+            </button>
+        </div>
+        
+        <div class="video-container">
+            <video id="webcam" autoplay playsinline></video>
+            <canvas id="output_canvas"></canvas>
+        </div>
+
+        <!-- Volume Meter -->
+        <div class="absolute right-6 top-1/2 -translate-y-1/2 z-20 flex flex-col items-center">
+            <div class="w-8 h-48 bg-gray-800 rounded-full overflow-hidden border-2 border-gray-600 flex flex-col justify-end shadow-lg">
+                <div id="volume-bar" class="w-full bg-yellow-500 transition-all duration-150" style="height: 50%;"></div>
+            </div>
+            <span id="volume-text" class="mt-2 font-mono text-lg font-bold">50%</span>
+        </div>
+    </div>
+
+    <div id="debug-console" class="mt-4 p-3 bg-black text-xs font-mono text-yellow-400 w-full max-w-2xl rounded border border-gray-700 h-24 overflow-y-auto">
+        > System ready. Waiting for user interaction...
+    </div>
+
+    <div class="mt-8 grid grid-cols-1 md:grid-cols-2 gap-4 w-full max-w-2xl">
+        <div class="p-4 bg-gray-800 rounded-lg">
+            <h3 class="font-bold text-yellow-300 mb-2">Kaise Use Karein:</h3>
+            <ul class="text-sm space-y-1 text-gray-300">
+                <li>1. "Start" par click karein aur Camera allow karein.</li>
+                <li>2. Aankhein wide kholne par volume badhega.</li>
+                <li>3. Aankhein halki band (blink/squint) karne par volume kam hoga.</li>
+                <li>4. System aapki Eye Aspect Ratio track kar raha hai.</li>
+            </ul>
+        </div>
+        <div class="p-4 bg-gray-800 rounded-lg">
+            <h3 class="font-bold text-green-300 mb-2">Live AI Tracking:</h3>
+            <p id="eye-ratio" class="text-sm text-gray-300">Eye Ratio: --</p>
+            <p id="status" class="text-sm text-gray-300">Status: Setup Pending</p>
+        </div>
+    </div>
+
+    <script type="module">
+        import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3";
+
+        const video = document.getElementById("webcam");
+        const canvasElement = document.getElementById("output_canvas");
+        const canvasCtx = canvasElement.getContext("2d");
+        const volumeBar = document.getElementById("volume-bar");
+        const volumeText = document.getElementById("volume-text");
+        const setupContainer = document.getElementById("setup-container");
+        const setupStatus = document.getElementById("setup-status");
+        const startBtn = document.getElementById("start-btn");
+        const loader = document.getElementById("loader");
+        const debugConsole = document.getElementById("debug-console");
+        const eyeRatioDisplay = document.getElementById("eye-ratio");
+
+        let faceLandmarker = undefined;
+        let lastVideoTime = -1;
+        let currentVolume = 50;
+
+        function log(msg) {
+            const entry = document.createElement('div');
+            entry.textContent = `> ${msg}`;
+            debugConsole.appendChild(entry);
+            debugConsole.scrollTop = debugConsole.scrollHeight;
+        }
+
+        async function init() {
+            try {
+                log("Fileset loading...");
+                const vision = await FilesetResolver.forVisionTasks(
+                    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
+                );
+                
+                log("Face Landmarker model loading...");
+                faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+                    baseOptions: {
+                        modelAssetPath: `https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task`,
+                        delegate: "GPU"
+                    },
+                    runningMode: "VIDEO",
+                    outputFaceBlendshapes: true
+                });
+                
+                log("AI Model Taiyaar Hai!");
+                setupStatus.innerText = "Taiyaar! Button dabaiye.";
+                loader.classList.add("hidden");
+                startBtn.classList.remove("hidden");
+            } catch (err) {
+                log("ERROR: " + err.message);
+                setupStatus.innerText = "Model load nahi ho paya.";
+            }
+        }
+
+        startBtn.addEventListener("click", async () => {
+            log("Camera access maang rahe hain...");
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { width: 1280, height: 720 } 
+                });
+                video.srcObject = stream;
+                setupContainer.classList.add("hidden");
+                log("Camera shuru! Face detect karein.");
+                video.addEventListener("loadeddata", () => {
+                    requestAnimationFrame(predictWebcam);
+                });
+            } catch (err) {
+                log("CAMERA ERROR: " + err.message);
+                alert("Camera permission zaroori hai.");
+            }
+        });
+
+        // Eye Points calculation (Euclidean distance)
+        function getDistance(p1, p2) {
+            return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
+        }
+
+        async function predictWebcam() {
+            if (canvasElement.width !== video.videoWidth || canvasElement.height !== video.videoHeight) {
+                canvasElement.width = video.videoWidth;
+                canvasElement.height = video.videoHeight;
+            }
+
+            let startTimeMs = performance.now();
+            
+            if (lastVideoTime !== video.currentTime && faceLandmarker) {
+                lastVideoTime = video.currentTime;
+                const results = faceLandmarker.detectForVideo(video, startTimeMs);
+
+                canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+                if (results.faceLandmarks && results.faceLandmarks.length > 0) {
+                    const landmarks = results.faceLandmarks[0];
+                    
+                    // Left Eye points (Top: 159, Bottom: 145)
+                    // Right Eye points (Top: 386, Bottom: 374)
+                    const leftEyeTop = landmarks[159];
+                    const leftEyeBot = landmarks[145];
+                    const rightEyeTop = landmarks[386];
+                    const rightEyeBot = landmarks[374];
+
+                    const leftRatio = getDistance(leftEyeTop, leftEyeBot);
+                    const rightRatio = getDistance(rightEyeTop, rightEyeBot);
+                    const avgRatio = (leftRatio + rightRatio) / 2;
+
+                    eyeRatioDisplay.innerText = `Eye Ratio: ${avgRatio.toFixed(4)}`;
+
+                    // Volume Logic: 
+                    // Band aankh (Blink) ~ 0.015
+                    // Khuli aankh ~ 0.035
+                    // Range Mapping
+                    let targetVol = (avgRatio - 0.012) * 5000; 
+                    targetVol = Math.max(0, Math.min(100, targetVol));
+                    
+                    // Smoothing volume changes
+                    currentVolume = (currentVolume * 0.8) + (targetVol * 0.2);
+                    
+                    updateVolumeUI(Math.round(currentVolume));
+                    drawFace(landmarks, avgRatio);
+                }
+            }
+
+            window.requestAnimationFrame(predictWebcam);
+        }
+
+        function updateVolumeUI(vol) {
+            volumeBar.style.height = `${vol}%`;
+            volumeText.innerText = `${vol}%`;
+        }
+
+        function drawFace(landmarks, ratio) {
+            canvasCtx.fillStyle = ratio < 0.02 ? "#ef4444" : "#fbbf24";
+            
+            // Draw only specific landmarks for eyes to keep it clean
+            const eyeIndices = [159, 145, 33, 133, 386, 374, 362, 263];
+            eyeIndices.forEach(idx => {
+                const point = landmarks[idx];
+                canvasCtx.beginPath();
+                canvasCtx.arc(point.x * canvasElement.width, point.y * canvasElement.height, 2, 0, 2 * Math.PI);
+                canvasCtx.fill();
+            });
+
+            // Draw a subtle border around the face
+            canvasCtx.strokeStyle = "rgba(251, 191, 36, 0.3)";
+            canvasCtx.lineWidth = 1;
+            // Draw a few mesh lines
+            for (let i = 0; i < 100; i+=5) {
+                const p = landmarks[i];
+                canvasCtx.beginPath();
+                canvasCtx.arc(p.x * canvasElement.width, p.y * canvasElement.height, 1, 0, 2 * Math.PI);
+                canvasCtx.stroke();
+            }
+        }
+
+        init();
+    </script>
+</body>
+</html>
+
+
